@@ -2,7 +2,17 @@
 #include <iostream>
 #include "gpu-new-forward.h"
 
-__global__ void conv_forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
+#define cuda_check(stmt) do {                                                    \
+        cudaError_t err = stmt;                                               \
+        if (err != cudaSuccess) {                                             \
+            std::cout << "Failed to run stmt " << #stmt << std::endl;                       \
+            std::cout << "Got CUDA error ...  " << cudaGetErrorString(err) << std::endl;    \
+            exit(-1);                                                        \
+        }                                                                     \
+    } while(0)
+
+#define TILE_WIDTH 32
+__global__ void conv_forward_kernel(float *y, const float *x, const float *k, const int M, const int C, const int H, const int W, const int K)
 {
     /*
     Modify this function to implement the forward pass described in Chapter 16.
@@ -23,20 +33,27 @@ __global__ void conv_forward_kernel(float *y, const float *x, const float *k, co
 
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
-    (void)H_out; // silence declared but never referenced warning. remove this line when you start working
-    (void)W_out; // silence declared but never referenced warning. remove this line when you start working
-
-    // We have some nice #defs for you below to simplify indexing. Feel free to use them, or create your own.
-    // An example use of these macros:
-    // float a = y4d(0,0,0,0)
-    // y4d(0,0,0,0) = a
+    const int w_grid = (int) ceil(((float) W_out) / TILE_WIDTH);
 
 #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
 #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
 #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+#define for_in(v, max) for (int v = 0; v < max; v++)
 
-    // Insert your GPU convolution kernel code here
-   
+    int m = blockIdx.z;
+    int h = blockIdx.y * TILE_WIDTH + threadIdx.y;
+    int w = blockIdx.x * TILE_WIDTH + threadIdx.x;
+    if (h < H_out && w < W_out) {
+        float acc = 0;
+        for_in(c, C) {
+            for_in(p, K) {
+                for_in(q, K) {
+                    acc += x4d(0, c, h + p, w + q) * k4d(m, c, p, q);
+                }
+            }
+        }
+        y4d(0, m, h, w) = acc;
+    }
 
 #undef y4d
 #undef x4d
@@ -46,22 +63,33 @@ __global__ void conv_forward_kernel(float *y, const float *x, const float *k, co
 __host__ void GPUInterface::conv_forward_gpu(float *host_y, const float *host_x, const float *host_k, const int B, const int M, const int C, const int H, const int W, const int K)
 {
     // Declare relevant device pointers
+    float *dev_x, *dev_y, *dev_k;
+    const int H_out = H - K + 1;
+    const int W_out = W - K + 1;
 
     // Allocate memory and copy over the relevant data structures to the GPU
+    size_t x_size = C * H * W * sizeof(float);
+    size_t y_size = M * H_out * W_out * sizeof(float);
+    size_t k_size = M * C * K * K * sizeof(float);
+    cuda_check(cudaMalloc(&dev_x, x_size));
+    cuda_check(cudaMalloc(&dev_y, y_size));
+    cuda_check(cudaMalloc(&dev_k, k_size));
+    cuda_check(cudaMemcpy(dev_k, host_k, k_size, cudaMemcpyHostToDevice));
 
-    // Set the kernel dimensions and call the kernel
+    // Set the kernel dimensions and call the kernel TODO
+    dim3 dim_grid(ceil((float) W_out / TILE_WIDTH), ceil((float) H_out / TILE_WIDTH), M);
+    dim3 dim_block(TILE_WIDTH, TILE_WIDTH, 1);
 
-    // Copy the output back to host
+    for_in(b, B) {
+        cuda_check(cudaMemcpy(dev_x, &host_x[b * C * H * W], x_size, cudaMemcpyHostToDevice));
+        conv_forward_kernel<<<dim_grid, dim_block>>>(dev_y, dev_x, dev_k, M, C, H, W, K);
+        cuda_check(cudaMemcpy(&host_y[b * M * H_out * W_out], dev_y, y_size, cudaMemcpyDeviceToHost));
+    }
 
     // Free device memory
-
-    // Useful snippet for error checking
-    // cudaError_t error = cudaGetLastError();
-    // if(error != cudaSuccess)
-    // {
-    //     std::cout<<"CUDA error: "<<cudaGetErrorString(error)<<std::endl;
-    //     exit(-1);
-    // }
+    cuda_check(cudaFree(dev_x));
+    cuda_check(cudaFree(dev_y));
+    cuda_check(cudaFree(dev_k));
 }
 
 __host__ void GPUInterface::get_device_properties()
