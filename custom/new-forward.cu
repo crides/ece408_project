@@ -17,8 +17,10 @@
 #define k4d(k, i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
 #define for_in(v, max) for (int v = 0; v < max; v++)
 
+__constant__ float constant_k[16 * 4 * 7 * 7];
+
 #define TILE_WIDTH 16
-__global__ void conv_forward_kernel(float *y, float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
+__global__ void conv_forward_kernel(float *y, float *x, const int B, const int M, const int C, const int H, const int W, const int K)
 {
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
@@ -39,7 +41,7 @@ __global__ void conv_forward_kernel(float *y, float *x, const float *k, const in
         for_in(c, C) {
             for_in(p, K) {
                 for_in(q, K) {
-                    acc += x4d(x, b, c, h + p, w + q) * k4d(k, m, c, p, q);
+                    acc += x4d(x, b, c, h + p, w + q) * k4d(constant_k, m, c, p, q);
                 }
             }
         }
@@ -63,7 +65,7 @@ __host__ void GPUInterface::conv_forward_gpu(float *host_y, const float *host_x,
     cuda_check(cudaMalloc(&dev_y, y_size));
     cuda_check(cudaMalloc(&dev_k, k_len * sizeof(float)));
     cuda_check(cudaMalloc(&dev_k_16, k_len * sizeof(float)));
-    cuda_check(cudaMemcpy(dev_k, host_k, k_len * sizeof(float), cudaMemcpyHostToDevice));
+    cuda_check(cudaMemcpyToSymbol(constant_k, host_k, k_len * sizeof(float)));
 
     const int H_grid = ceil((float) H_out / TILE_WIDTH);
     const int W_grid = ceil((float) W_out / TILE_WIDTH);
@@ -72,7 +74,7 @@ __host__ void GPUInterface::conv_forward_gpu(float *host_y, const float *host_x,
     dim3 dim_block(TILE_WIDTH, TILE_WIDTH, 1);
 
     cuda_check(cudaMemcpy(dev_x, host_x, x_len * sizeof(float), cudaMemcpyHostToDevice));
-    conv_forward_kernel<<<dim_grid, dim_block>>>(dev_y, dev_x, dev_k, B, M, C, H, W, K);
+    conv_forward_kernel<<<dim_grid, dim_block>>>(dev_y, dev_x, B, M, C, H, W, K);
     cuda_check(cudaMemcpy(host_y, dev_y, y_size, cudaMemcpyDeviceToHost));
 
     // Free device memory
